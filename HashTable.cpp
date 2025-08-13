@@ -1,153 +1,168 @@
 #include "HashTable.h"
 #include <iostream>
 #include <stdexcept>
-// Use a lower max load factor for open addressing to ensure empty slots for probing.
+#include <sstream>
+
 const double MAX_LOAD_FACTOR = 0.7;
 
-// The constructor initializes the table with empty entries.
-CustomHashTable::CustomHashTable(const std::string& log_filename, size_t initial_capacity) {
-    // Open the log file in append mode.
+template <typename K, typename V>
+CustomHashTable<K, V>::CustomHashTable(const std::string& log_filename, size_t initial_capacity)
+    : bloom_filter(1000, 5) {
     log_file.open(log_filename, std::ios::app);
     if (!log_file.is_open()) {
-        // If the file can't be opened, we can't guarantee durability, so we should stop.
         throw std::runtime_error("FATAL: Could not open log file: " + log_filename);
     }
 
     this->capacity = initial_capacity;
     this->buckets.resize(this->capacity);
     this->current_size = 0;
+    load_from_log();
 }
 
-// The destructor is empty because std::vector handles all memory management.
-CustomHashTable::~CustomHashTable() {
+template <typename K, typename V>
+CustomHashTable<K, V>::~CustomHashTable() {
     if (log_file.is_open()) {
         log_file.close();
     }
 }
 
-// First hash function to determine the initial bucket.
-size_t CustomHashTable::hash1(const std::string& key) const {
-    size_t hash = 5381;
-    for (char c : key) {
-        hash = ((hash << 5) + hash) + c; // hash * 33 + c
+template <typename K, typename V>
+void CustomHashTable<K, V>::load_from_log() {
+    std::ifstream log_stream("kv_store.log");
+    if (!log_stream.is_open()) {
+        return; // No log file to load
     }
-    return hash % capacity;
+
+    std::string line;
+    while (std::getline(log_stream, line)) {
+        std::stringstream ss(line);
+        std::string command, key, value;
+        ss >> command >> key;
+        if (command == "set") {
+            ss >> value;
+            set(key, value);
+        } else if (command == "del") {
+            del(key);
+        }
+    }
+    log_stream.close();
 }
 
-// Second hash function to determine the probe step size.
-// Must be a different algorithm and must not return 0.
-size_t CustomHashTable::hash2(const std::string& key) const {
-    size_t hash = 0;
-    for (char c : key) {
-        hash = c + (hash << 6) + (hash << 16) - hash;
-    }
-    // Ensure the step is non-zero. R - (key % R) is a common technique.
-    return (hash % (capacity - 1)) + 1;
+template <typename K, typename V>
+size_t CustomHashTable<K, V>::hash1(const K& key) const {
+    return std::hash<K>{}(key) % capacity;
 }
 
-// The 'set' method was mostly correct and is kept here.
-void CustomHashTable::set(const std::string& key, const std::string& value) {
+template <typename K, typename V>
+size_t CustomHashTable<K, V>::hash2(const K& key) const {
+    return (std::hash<K>{}(key) % (capacity - 1)) + 1;
+}
+
+template <typename K, typename V>
+void CustomHashTable<K, V>::set(const K& key, const V& value) {
     log_file << "set " << key << " " << value << std::endl;
-    // Check if a rehash is needed before inserting a new element.
+    bloom_filter.add(key);
+
     if ((double)(current_size + 1) / capacity > MAX_LOAD_FACTOR) {
         rehash();
     }
 
     size_t index = hash1(key);
     size_t step = hash2(key);
-    size_t first_deleted = -1; // Sentinel value to track the first tombstone
+    size_t first_deleted = -1;
 
     for (size_t i = 0; i < capacity; ++i) {
-        Entry& entry = buckets[index]; // Use a reference to modify the actual entry
+        Entry<K, V>& entry = buckets[index];
 
         if (entry.state == EntryState::OCCUPIED && entry.key == key) {
-            entry.value = value; // Update existing key
+            entry.value = value;
             return;
         }
         if (entry.state == EntryState::DELETED) {
             if (first_deleted == (size_t)-1) {
-                first_deleted = index; // Found the first tombstone, save its position
+                first_deleted = index;
             }
         }
         if (entry.state == EntryState::EMPTY) {
-            // Found a truly empty spot. Use it, or the first tombstone if we found one.
             size_t insert_pos = (first_deleted != (size_t)-1) ? first_deleted : index;
             buckets[insert_pos] = {key, value, EntryState::OCCUPIED};
             current_size++;
             return;
         }
-        index = (index + step) % capacity; // Probe the next spot
+        index = (index + step) % capacity;
     }
 }
 
-// *** CORRECTED 'get' method ***
-std::string CustomHashTable::get(const std::string& key) {
+template <typename K, typename V>
+V CustomHashTable<K, V>::get(const K& key) {
+    if (!bloom_filter.contains(key)) {
+        return V{}; // Return default-constructed value
+    }
+
     size_t index = hash1(key);
     size_t step = hash2(key);
 
     for (size_t i = 0; i < capacity; ++i) {
-        const Entry& entry = buckets[index]; // Use a const reference to read
+        const Entry<K, V>& entry = buckets[index];
 
-        // If we hit an empty slot, the key cannot be in the table.
         if (entry.state == EntryState::EMPTY) {
-            return "(nil)";
+            return V{};
         }
-        // If we find an occupied slot with the correct key, we've found our value.
         if (entry.state == EntryState::OCCUPIED && entry.key == key) {
             return entry.value;
         }
-        // If the slot is deleted or occupied by another key, continue probing.
         index = (index + step) % capacity;
     }
 
-    // If we search the whole table and don't find it, it's not there.
-    return "(nil)";
+    return V{};
 }
 
-// *** CORRECTED 'del' method ***
-bool CustomHashTable::del(const std::string& key) {
-      log_file << "del " << key << std::endl;
+template <typename K, typename V>
+bool CustomHashTable<K, V>::del(const K& key) {
+    if (!bloom_filter.contains(key)) {
+        return false;
+    }
+
+    log_file << "del " << key << std::endl;
     size_t index = hash1(key);
     size_t step = hash2(key);
 
     for (size_t i = 0; i < capacity; ++i) {
-        Entry& entry = buckets[index]; // Use a reference to modify the entry
+        Entry<K, V>& entry = buckets[index];
 
         if (entry.state == EntryState::EMPTY) {
-            return false; // Key not found
+            return false;
         }
         if (entry.state == EntryState::OCCUPIED && entry.key == key) {
-            entry.state = EntryState::DELETED; // Mark with a tombstone
-            entry.key = "";   // Clear data to save space
-            entry.value = "";
+            entry.state = EntryState::DELETED;
+            entry.key = K{};
+            entry.value = V{};
             current_size--;
             return true;
         }
         index = (index + step) % capacity;
     }
 
-    return false; // Key not found after searching the whole table
+    return false;
 }
 
-// *** CORRECTED 'rehash' method ***
-void CustomHashTable::rehash() {
+template <typename K, typename V>
+void CustomHashTable<K, V>::rehash() {
     std::cout << "[SYSTEM] Load factor exceeded. Rehashing from " << capacity << " to " << capacity * 2 << " buckets." << std::endl;
 
     size_t old_capacity = capacity;
-    std::vector<Entry> old_buckets = std::move(buckets); // Efficiently move the old data
+    std::vector<Entry<K, V>> old_buckets = std::move(buckets);
 
-    // Double the capacity, create a new empty table
     capacity *= 2;
-    buckets.assign(capacity, Entry()); // .assign is a clean way to resize and fill
-    current_size = 0; // The 'set' method will recount the size
+    buckets.assign(capacity, Entry<K, V>());
+    current_size = 0;
 
-    // Iterate through all buckets of the OLD table
     for (size_t i = 0; i < old_capacity; ++i) {
-        // Only re-insert entries that were actually occupied
         if (old_buckets[i].state == EntryState::OCCUPIED) {
-            // Use the public 'set' method to re-insert the entry into the new, larger table.
-            // 'set' will correctly handle hashing with the new capacity.
             set(old_buckets[i].key, old_buckets[i].value);
         }
     }
 }
+
+// Explicit template instantiation
+template class CustomHashTable<std::string, std::string>;
