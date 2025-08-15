@@ -1,0 +1,2 @@
+# Compile all source files and link the Winsock library
+g++ main.cpp HashTable.cpp Server.cpp -o kv_server.exe -std=c++17 -pthread -lws2_32

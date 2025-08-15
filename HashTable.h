@@ -24,15 +24,20 @@ private:
     std::ofstream log_file;
 
     mutable std::mutex table_mutex; 
+    std::string log_filename;
     
+    void load_from_snapshot();
+    void replay_log();
+
     void rehash();
     // The function to convert a key into a bucket index.
     size_t hash1(const std::string& key) const;
     size_t hash2(const std::string& key) const;
 
 public:
-    explicit CustomHashTable(const std::string& log_filename, size_t initial_capacity = 2);
+     explicit CustomHashTable(const std::string& log_file);
     ~CustomHashTable();
+    void create_snapshot();
     void set(const std::string& key, const std::string& value);
     std::string get(const std::string& key);
     bool del(const std::string& key);
