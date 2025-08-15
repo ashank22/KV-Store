@@ -47,6 +47,7 @@ size_t CustomHashTable::hash2(const std::string& key) const {
 
 // The 'set' method was mostly correct and is kept here.
 void CustomHashTable::set(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lock(table_mutex);
     log_file << "set " << key << " " << value << std::endl;
     // Check if a rehash is needed before inserting a new element.
     if ((double)(current_size + 1) / capacity > MAX_LOAD_FACTOR) {
@@ -82,6 +83,8 @@ void CustomHashTable::set(const std::string& key, const std::string& value) {
 
 // *** CORRECTED 'get' method ***
 std::string CustomHashTable::get(const std::string& key) {
+    std::lock_guard<std::mutex> lock(table_mutex);
+
     size_t index = hash1(key);
     size_t step = hash2(key);
 
@@ -106,7 +109,9 @@ std::string CustomHashTable::get(const std::string& key) {
 
 // *** CORRECTED 'del' method ***
 bool CustomHashTable::del(const std::string& key) {
-      log_file << "del " << key << std::endl;
+    std::lock_guard<std::mutex> lock(table_mutex);
+
+    log_file << "del " << key << std::endl;
     size_t index = hash1(key);
     size_t step = hash2(key);
 
@@ -143,11 +148,22 @@ void CustomHashTable::rehash() {
 
     // Iterate through all buckets of the OLD table
     for (size_t i = 0; i < old_capacity; ++i) {
-        // Only re-insert entries that were actually occupied
         if (old_buckets[i].state == EntryState::OCCUPIED) {
-            // Use the public 'set' method to re-insert the entry into the new, larger table.
-            // 'set' will correctly handle hashing with the new capacity.
-            set(old_buckets[i].key, old_buckets[i].value);
+            const std::string& key = old_buckets[i].key;
+            const std::string& value = old_buckets[i].value;
+
+              // The public `set` method can't be used here as it would try to lock the mutex again,
+    // causing a deadlock. So we have to re-implement the set logic without the lock.
+            size_t index = hash1(key);
+            size_t step = hash2(key);
+            for (size_t j = 0; j < capacity; ++j) {
+                if (buckets[index].state != EntryState::OCCUPIED) {
+                    buckets[index] = {key, value, EntryState::OCCUPIED};
+                    current_size++;
+                    break;
+                }
+                index = (index + step) % capacity;
+            }
         }
     }
 }

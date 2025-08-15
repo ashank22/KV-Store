@@ -22,6 +22,9 @@ private:
     size_t capacity;  
     size_t current_size;          // The total number of buckets
     std::ofstream log_file;
+
+    mutable std::mutex table_mutex; 
+    
     void rehash();
     // The function to convert a key into a bucket index.
     size_t hash1(const std::string& key) const;
